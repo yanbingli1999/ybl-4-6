@@ -8,8 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 const DATA_DIR = path.join(__dirname, 'data');
-const DATASETS_FILE = path.join(DATA_DIR, 'datasets.json');
-const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
+const REPORTS_FILE = path.join(DATA_DIR, 'reports.json');
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -19,11 +18,8 @@ function ensureDataFiles() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
-  if (!fs.existsSync(DATASETS_FILE)) {
-    fs.writeFileSync(DATASETS_FILE, JSON.stringify([], null, 2));
-  }
-  if (!fs.existsSync(HISTORY_FILE)) {
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify([], null, 2));
+  if (!fs.existsSync(REPORTS_FILE)) {
+    fs.writeFileSync(REPORTS_FILE, JSON.stringify([], null, 2));
   }
 }
 ensureDataFiles();
@@ -59,39 +55,6 @@ function linearRegression(points) {
   return { a: slope, b: intercept };
 }
 
-function exponentialRegression(points) {
-  const invalidPoints = points.filter(p => p.y <= 0);
-  if (invalidPoints.length > 0) {
-    const indices = invalidPoints.map((_, i) => {
-      const idx = points.indexOf(invalidPoints[i]) + 1;
-      return `#${idx}(y=${invalidPoints[i].y})`;
-    }).join(', ');
-    throw new Error(`指数拟合要求所有Y值必须大于0，存在非法点: ${indices}`);
-  }
-  const n = points.length;
-  const logPoints = points.map(p => ({ x: p.x, y: Math.log(p.y) }));
-  const linearResult = linearRegression(logPoints);
-  return { a: Math.exp(linearResult.b), b: linearResult.a };
-}
-
-function quadraticRegression(points) {
-  const n = points.length;
-  const rows = points.map(p => [p.x * p.x, p.x, 1]);
-  const A = math.matrix(rows);
-  const b = math.matrix(points.map(p => p.y));
-  const AT = math.transpose(A);
-  const ATA = math.multiply(AT, A);
-  const ATb = math.multiply(AT, b);
-  try {
-    const ATAInv = math.inv(ATA);
-    const x = math.multiply(ATAInv, ATb);
-    const result = x.toArray();
-    return { a: result[0], b: result[1], c: result[2] };
-  } catch (e) {
-    return { a: 0, b: 0, c: 0 };
-  }
-}
-
 function calculateMetrics(points, modelType, params) {
   const n = points.length;
   let yMean = 0;
@@ -110,12 +73,6 @@ function calculateMetrics(points, modelType, params) {
       case 'linear':
         predicted = params.a * p.x + params.b;
         break;
-      case 'exponential':
-        predicted = params.a * Math.exp(params.b * p.x);
-        break;
-      case 'quadratic':
-        predicted = params.a * p.x * p.x + params.b * p.x + params.c;
-        break;
     }
     const residual = p.y - predicted;
     residuals.push(residual);
@@ -130,14 +87,7 @@ function calculateMetrics(points, modelType, params) {
   const rmse = Math.sqrt(rmseSum / n);
   const mae = maeSum / n;
 
-  const residualStd = math.std(residuals);
-
-  const outliers = residuals.map((r, i) => {
-    const zScore = Math.abs(r - math.mean(residuals)) / residualStd;
-    return { index: i, isOutlier: zScore > 2, zScore: zScore, residual: r };
-  });
-
-  return { rSquared, mse, rmse, mae, residuals, outliers };
+  return { rSquared, mse, rmse, mae, residuals };
 }
 
 function generateCurvePoints(points, modelType, params, numPoints = 100) {
@@ -145,8 +95,8 @@ function generateCurvePoints(points, modelType, params, numPoints = 100) {
   const minX = Math.min(...xs);
   const maxX = Math.max(...xs);
   const range = maxX - minX || 1;
-  const extendedMin = minX - range * 0.1;
-  const extendedMax = maxX + range * 0.1;
+  const extendedMin = minX - range * 0.05;
+  const extendedMax = maxX + range * 0.05;
   const step = (extendedMax - extendedMin) / (numPoints - 1);
   const curvePoints = [];
   for (let i = 0; i < numPoints; i++) {
@@ -156,95 +106,94 @@ function generateCurvePoints(points, modelType, params, numPoints = 100) {
       case 'linear':
         y = params.a * x + params.b;
         break;
-      case 'exponential':
-        y = params.a * Math.exp(params.b * x);
-        break;
-      case 'quadratic':
-        y = params.a * x * x + params.b * x + params.c;
-        break;
     }
     curvePoints.push({ x, y });
   }
   return curvePoints;
 }
 
-app.get('/api/datasets', (req, res) => {
-  const datasets = readJsonFile(DATASETS_FILE);
-  res.json(datasets);
+app.get('/api/reports', (req, res) => {
+  const reports = readJsonFile(REPORTS_FILE);
+  const summaries = reports.map(r => ({
+    id: r.id,
+    deviceId: r.deviceId,
+    deviceName: r.deviceName,
+    calibrationDate: r.calibrationDate,
+    operator: r.operator,
+    passed: r.passed,
+    outOfToleranceCount: r.outOfToleranceCount,
+    pointsCount: r.calibrationPoints.length,
+    createdAt: r.createdAt
+  }));
+  res.json(summaries);
 });
 
-app.post('/api/datasets', (req, res) => {
-  const { name, points } = req.body;
-  if (!name || !points || !Array.isArray(points)) {
-    return res.status(400).json({ error: '缺少必要参数' });
-  }
-  const datasets = readJsonFile(DATASETS_FILE);
-  const dataset = {
-    id: generateId(),
-    name,
-    points,
-    createdAt: new Date().toISOString()
-  };
-  datasets.push(dataset);
-  writeJsonFile(DATASETS_FILE, datasets);
-  res.json(dataset);
-});
-
-app.put('/api/datasets/:id', (req, res) => {
+app.get('/api/reports/:id', (req, res) => {
   const { id } = req.params;
-  const { name, points } = req.body;
-  const datasets = readJsonFile(DATASETS_FILE);
-  const index = datasets.findIndex(d => d.id === id);
-  if (index === -1) {
-    return res.status(404).json({ error: '数据集不存在' });
+  const reports = readJsonFile(REPORTS_FILE);
+  const report = reports.find(r => r.id === id);
+  if (!report) {
+    return res.status(404).json({ error: '报告不存在' });
   }
-  datasets[index].name = name || datasets[index].name;
-  datasets[index].points = points || datasets[index].points;
-  datasets[index].updatedAt = new Date().toISOString();
-  writeJsonFile(DATASETS_FILE, datasets);
-  res.json(datasets[index]);
+  res.json(report);
 });
 
-app.delete('/api/datasets/:id', (req, res) => {
+app.delete('/api/reports/:id', (req, res) => {
   const { id } = req.params;
-  let datasets = readJsonFile(DATASETS_FILE);
-  const initialLength = datasets.length;
-  datasets = datasets.filter(d => d.id !== id);
-  if (datasets.length === initialLength) {
-    return res.status(404).json({ error: '数据集不存在' });
+  let reports = readJsonFile(REPORTS_FILE);
+  const initialLength = reports.length;
+  reports = reports.filter(r => r.id !== id);
+  if (reports.length === initialLength) {
+    return res.status(404).json({ error: '报告不存在' });
   }
-  writeJsonFile(DATASETS_FILE, datasets);
+  writeJsonFile(REPORTS_FILE, reports);
   res.json({ success: true });
 });
 
-app.post('/api/fit', (req, res) => {
-  const { datasetId, points, modelType, datasetName } = req.body;
-  if (!points || !Array.isArray(points) || points.length < 2) {
-    return res.status(400).json({ error: '至少需要2个数据点' });
+app.post('/api/calibrate', (req, res) => {
+  const {
+    deviceId,
+    deviceName,
+    calibrationDate,
+    operator,
+    calibrationPoints,
+    modelType = 'linear'
+  } = req.body;
+
+  if (!deviceId) {
+    return res.status(400).json({ error: '请输入设备编号' });
   }
-  if (!modelType) {
-    return res.status(400).json({ error: '请选择拟合模型' });
+  if (!calibrationPoints || !Array.isArray(calibrationPoints) || calibrationPoints.length < 2) {
+    return res.status(400).json({ error: '至少需要2个校准点' });
   }
+
+  for (let i = 0; i < calibrationPoints.length; i++) {
+    const pt = calibrationPoints[i];
+    if (pt.standard === undefined || pt.standard === null || isNaN(pt.standard)) {
+      return res.status(400).json({ error: `第${i + 1}个校准点的标准值无效` });
+    }
+    if (pt.measured === undefined || pt.measured === null || isNaN(pt.measured)) {
+      return res.status(400).json({ error: `第${i + 1}个校准点的测量值无效` });
+    }
+    if (pt.tolerance === undefined || pt.tolerance === null || isNaN(pt.tolerance)) {
+      return res.status(400).json({ error: `第${i + 1}个校准点的允许误差无效` });
+    }
+  }
+
+  const points = calibrationPoints.map(pt => ({
+    x: pt.standard,
+    y: pt.measured
+  }));
 
   let params;
   let modelEquation;
-
   try {
     switch (modelType) {
       case 'linear':
+      default:
         params = linearRegression(points);
         modelEquation = `y = ${params.a.toFixed(6)}x + ${params.b.toFixed(6)}`;
         break;
-      case 'exponential':
-        params = exponentialRegression(points);
-        modelEquation = `y = ${params.a.toFixed(6)} · e^(${params.b.toFixed(6)}x)`;
-        break;
-      case 'quadratic':
-        params = quadraticRegression(points);
-        modelEquation = `y = ${params.a.toFixed(6)}x² + ${params.b.toFixed(6)}x + ${params.c.toFixed(6)}`;
-        break;
-      default:
-        return res.status(400).json({ error: '不支持的模型类型' });
     }
   } catch (e) {
     return res.status(400).json({ error: '拟合计算失败: ' + e.message });
@@ -253,10 +202,31 @@ app.post('/api/fit', (req, res) => {
   const metrics = calculateMetrics(points, modelType, params);
   const curvePoints = generateCurvePoints(points, modelType, params);
 
+  const analyzedPoints = calibrationPoints.map((pt, idx) => {
+    const predicted = params.a * pt.standard + params.b;
+    const absoluteError = pt.measured - pt.standard;
+    const relativeError = pt.standard !== 0 ? (absoluteError / pt.standard) * 100 : 0;
+    const fittedError = pt.measured - predicted;
+    const isOutOfTolerance = Math.abs(absoluteError) > pt.tolerance;
+    return {
+      ...pt,
+      predicted,
+      absoluteError,
+      relativeError,
+      fittedError,
+      isOutOfTolerance
+    };
+  });
+
+  const outOfToleranceCount = analyzedPoints.filter(p => p.isOutOfTolerance).length;
+  const passed = outOfToleranceCount === 0;
+
   const result = {
     id: generateId(),
-    datasetId: datasetId || null,
-    datasetName: datasetName || '未命名数据集',
+    deviceId,
+    deviceName: deviceName || '',
+    calibrationDate: calibrationDate || new Date().toISOString().split('T')[0],
+    operator: operator || '',
     modelType,
     params,
     modelEquation,
@@ -266,60 +236,24 @@ app.post('/api/fit', (req, res) => {
       rmse: metrics.rmse,
       mae: metrics.mae
     },
-    residuals: metrics.residuals,
-    outliers: metrics.outliers,
+    calibrationPoints: analyzedPoints,
     curvePoints,
-    points,
+    residuals: metrics.residuals,
+    passed,
+    outOfToleranceCount,
     createdAt: new Date().toISOString()
   };
 
-  const history = readJsonFile(HISTORY_FILE);
-  history.unshift(result);
-  if (history.length > 50) {
-    history.length = 50;
+  const reports = readJsonFile(REPORTS_FILE);
+  reports.unshift(result);
+  if (reports.length > 100) {
+    reports.length = 100;
   }
-  writeJsonFile(HISTORY_FILE, history);
+  writeJsonFile(REPORTS_FILE, reports);
 
   res.json(result);
-});
-
-app.get('/api/history', (req, res) => {
-  const history = readJsonFile(HISTORY_FILE);
-  const summaries = history.map(h => ({
-    id: h.id,
-    datasetId: h.datasetId,
-    datasetName: h.datasetName,
-    modelType: h.modelType,
-    modelEquation: h.modelEquation,
-    metrics: h.metrics,
-    pointsCount: h.points.length,
-    createdAt: h.createdAt
-  }));
-  res.json(summaries);
-});
-
-app.get('/api/history/:id', (req, res) => {
-  const { id } = req.params;
-  const history = readJsonFile(HISTORY_FILE);
-  const result = history.find(h => h.id === id);
-  if (!result) {
-    return res.status(404).json({ error: '记录不存在' });
-  }
-  res.json(result);
-});
-
-app.delete('/api/history/:id', (req, res) => {
-  const { id } = req.params;
-  let history = readJsonFile(HISTORY_FILE);
-  const initialLength = history.length;
-  history = history.filter(h => h.id !== id);
-  if (history.length === initialLength) {
-    return res.status(404).json({ error: '记录不存在' });
-  }
-  writeJsonFile(HISTORY_FILE, history);
-  res.json({ success: true });
 });
 
 app.listen(PORT, () => {
-  console.log(`实验曲线拟合台 服务器已启动: http://localhost:${PORT}`);
+  console.log(`仪器校准任务面板 服务器已启动: http://localhost:${PORT}`);
 });

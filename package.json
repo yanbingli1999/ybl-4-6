@@ -1,7 +1,7 @@
 {
-  "name": "curve-fitting-lab",
+  "name": "instrument-calibration",
   "version": "1.0.0",
-  "description": "实验曲线拟合台 - 科学计算Web工具",
+  "description": "仪器校准任务面板 - 设备校准与拟合判定工具",
   "main": "server.js",
   "scripts": {
     "start": "set PORT=5406&& node server.js",
